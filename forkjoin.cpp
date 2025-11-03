@@ -49,6 +49,53 @@ private:
     }
 
 public:
+class WorkStealingDeque {
+private:
+    std::deque<std::unique_ptr<RecursiveTask>> tasks;
+    mutable std::mutex mtx;
+    int ownerID;
+
+public:
+    WorkStealingDeque(int id = -1) : ownerID(id) {}
+
+    void push(std::unique_ptr<RecursiveTask> task) {
+        std::lock_guard<std::mutex> lock(mtx);
+        tasks.push_back(std::move(task));
+    }
+
+    std::unique_ptr<RecursiveTask> pop() {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (tasks.empty()) return nullptr;
+        auto task = std::move(tasks.back());
+        tasks.pop_back();
+        return task;
+    }
+
+    std::unique_ptr<RecursiveTask> steal(int thiefID) {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (tasks.empty()) return nullptr;
+         // {
+        //     std::lock_guard<std::mutex> cout_lock(cout_mutex);
+        //     std::cout << "[STEAL] Thread " << thiefID
+        //               << " stealing from Thread " << ownerID
+        //               << " (victim has " << tasks.size() << " tasks)\n";
+        // }
+        auto task = std::move(tasks.front());
+        tasks.pop_front();
+        return task;
+    }
+
+    bool empty() const {
+        std::lock_guard<std::mutex> lock(mtx);
+        return tasks.empty();
+    }
+
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(mtx);
+        return tasks.size();
+    }
+};
+
     QuickSortTask(std::vector<int> &array, ForkJoinPool &poolRef, int l, int r, int thresh = 200000)
         : arr(array), pool(poolRef), leftInit(l), rightInit(r), threshold(thresh) {}
 
