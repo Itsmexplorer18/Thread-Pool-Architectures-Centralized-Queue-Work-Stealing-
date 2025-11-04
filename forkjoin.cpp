@@ -95,6 +95,110 @@ public:
         return tasks.size();
     }
 };
+class ForkJoinPool {
+private:
+    std::vector<std::thread> workers;
+    std::vector<std::unique_ptr<WorkStealingDeque>> queues;
+    std::atomic<bool> shutdown{false};
+    std::atomic<int> activeWorkers{0};
+    std::mutex globalMtx;
+    std::condition_variable globalCV;
+    thread_local static int workerID;
+    int numWorkers;
+
+    void workerThread(int id) {
+        workerID = id;
+        
+        while (!shutdown.load()) {
+            std::unique_ptr<RecursiveTask> task = nullptr;
+            
+            // Try to get task from own queue
+            task = queues[id]->pop();
+            
+            // If no task, try to steal from other queues
+            if (!task) {
+                for (int i = 0; i < numWorkers && !task; ++i) {
+                    if (i != id) {
+                        task = queues[i]->steal();
+                    }
+                }
+            }
+            
+            if (task) {
+                activeWorkers.fetch_add(1);
+                task->compute();
+                activeWorkers.fetch_sub(1);
+                globalCV.notify_all();
+            } else {
+                // No work available, wait briefly
+                std::unique_lock<std::mutex> lock(globalMtx);
+                globalCV.wait_for(lock, std::chrono::microseconds(100));
+            }
+        }
+    }
+
+public:
+    explicit ForkJoinPool(int threads = std::thread::hardware_concurrency()) 
+        : numWorkers(threads) {
+        
+        for (int i = 0; i < numWorkers; ++i) {
+            queues.push_back(std::make_unique<WorkStealingDeque>());
+        }
+        
+        for (int i = 0; i < numWorkers; ++i) {
+            workers.emplace_back(&ForkJoinPool::workerThread, this, i);
+        }
+    }
+
+    ~ForkJoinPool() {
+        shutdown.store(true);
+        globalCV.notify_all();
+        for (auto& worker : workers) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+    }
+
+    void submit(std::unique_ptr<RecursiveTask> task) {
+        int id = workerID;
+        if (id >= 0 && id < numWorkers) {
+            queues[id]->push(std::move(task));
+        } else {
+            // Called from outside worker thread, distribute randomly
+            static thread_local std::mt19937 gen(std::random_device{}());
+            std::uniform_int_distribution<> dis(0, numWorkers - 1);
+            queues[dis(gen)]->push(std::move(task));
+        }
+        globalCV.notify_one();
+    }
+
+    void invoke(std::unique_ptr<RecursiveTask> task) {
+        submit(std::move(task));
+        waitForCompletion();
+    }
+
+    void waitForCompletion() {
+        std::unique_lock<std::mutex> lock(globalMtx);
+        globalCV.wait(lock, [this] {
+            bool allEmpty = true;
+            for (const auto& q : queues) {
+                if (!q->empty()) {
+                    allEmpty = false;
+                    break;
+                }
+            }
+            return allEmpty && activeWorkers.load() == 0;
+        });
+    }
+
+    static ForkJoinPool& getCurrentPool() {
+        static ForkJoinPool pool;
+        return pool;
+    }
+};
+
+thread_local int ForkJoinPool::workerID = -1;
 
     QuickSortTask(std::vector<int> &array, ForkJoinPool &poolRef, int l, int r, int thresh = 200000)
         : arr(array), pool(poolRef), leftInit(l), rightInit(r), threshold(thresh) {}
