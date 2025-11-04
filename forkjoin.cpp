@@ -1,6 +1,3 @@
-#ifndef FORKJOINPOOL_H
-#define FORKJOINPOOL_H
-
 #include <iostream>
 #include <vector>
 #include <thread>
@@ -13,6 +10,7 @@
 #include <random>
 #include <chrono>
 
+// Generic RecursiveTask base class
 class RecursiveTask {
 public:
     virtual ~RecursiveTask() = default;
@@ -20,35 +18,7 @@ public:
     virtual bool shouldFork() const = 0;
 };
 
-class QuickSortTask : public RecursiveTask {
-private:
-    std::vector<int> &arr;
-    ForkJoinPool &pool;
-    int leftInit, rightInit;
-    const int threshold;
-
-    static int partition(std::vector<int> &a, int l, int r) {
-        int pivot = a[r];
-        int i = l - 1;
-        for (int j = l; j < r; ++j) {
-            if (a[j] <= pivot) {
-                ++i;
-                std::swap(a[i], a[j]);
-            }
-        }
-        std::swap(a[i + 1], a[r]);
-        return i + 1;
-    }
-
-    static void sequentialSort(std::vector<int> &a, int l, int r) {
-        if (l < r) {
-            int pi = partition(a, l, r);
-            sequentialSort(a, l, pi - 1);
-            sequentialSort(a, pi + 1, r);
-        }
-    }
-
-public:
+// Work-stealing deque for each worker thread
 class WorkStealingDeque {
 private:
     std::deque<std::unique_ptr<RecursiveTask>> tasks;
@@ -57,7 +27,6 @@ private:
 
 public:
     WorkStealingDeque(int id = -1) : ownerID(id) {}
-
     void push(std::unique_ptr<RecursiveTask> task) {
         std::lock_guard<std::mutex> lock(mtx);
         tasks.push_back(std::move(task));
@@ -74,12 +43,10 @@ public:
     std::unique_ptr<RecursiveTask> steal(int thiefID) {
         std::lock_guard<std::mutex> lock(mtx);
         if (tasks.empty()) return nullptr;
-         // {
-        //     std::lock_guard<std::mutex> cout_lock(cout_mutex);
-        //     std::cout << "[STEAL] Thread " << thiefID
-        //               << " stealing from Thread " << ownerID
-        //               << " (victim has " << tasks.size() << " tasks)\n";
-        // }
+        
+        std::cout << "[STEAL] Thread " << thiefID << " stealing from Thread " << ownerID 
+                  << " (victim has " << tasks.size() << " tasks)\n";
+        
         auto task = std::move(tasks.front());
         tasks.pop_front();
         return task;
@@ -95,6 +62,8 @@ public:
         return tasks.size();
     }
 };
+
+// ForkJoinPool implementation
 class ForkJoinPool {
 private:
     std::vector<std::thread> workers;
@@ -119,7 +88,7 @@ private:
             if (!task) {
                 for (int i = 0; i < numWorkers && !task; ++i) {
                     if (i != id) {
-                        task = queues[i]->steal();
+                        task = queues[i]->steal(id);
                     }
                 }
             }
@@ -142,7 +111,7 @@ public:
         : numWorkers(threads) {
         
         for (int i = 0; i < numWorkers; ++i) {
-            queues.push_back(std::make_unique<WorkStealingDeque>());
+            queues.push_back(std::make_unique<WorkStealingDeque>(i));
         }
         
         for (int i = 0; i < numWorkers; ++i) {
@@ -200,47 +169,114 @@ public:
 
 thread_local int ForkJoinPool::workerID = -1;
 
-    QuickSortTask(std::vector<int> &array, ForkJoinPool &poolRef, int l, int r, int thresh = 200000)
-        : arr(array), pool(poolRef), leftInit(l), rightInit(r), threshold(thresh) {}
 
-    bool shouldFork() const override { return (rightInit - leftInit) > threshold; }
+class QuickSortTask : public RecursiveTask {
+private:
+    std::vector<int>& arr;
+    int left;
+    int right;
+    const int threshold;
 
-    void compute() override {
-        int l = leftInit;
-        int r = rightInit;
-
-        while (l < r) {
-            if ((r - l) <= threshold) {
-                sequentialSort(arr, l, r);
-                return;
-            }
-
-            int pi = partition(arr, l, r);
-
-            int leftL = l;
-            int leftR = pi - 1;
-            int rightL = pi + 1;
-            int rightR = r;
-
-            int leftSize = (leftR >= leftL) ? (leftR - leftL + 1) : 0;
-            int rightSize = (rightR >= rightL) ? (rightR - rightL + 1) : 0;
-
-            if (leftSize < rightSize) {
-                if (leftSize > 0) {
-                    pool.submit(std::make_unique<QuickSortTask>(arr, pool, leftL, leftR, threshold));
-                }
-                l = rightL;
-                r = rightR;
-            } else {
-                if (rightSize > 0) {
-                    pool.submit(std::make_unique<QuickSortTask>(arr, pool, rightL, rightR, threshold));
-                }
-                l = leftL;
-                r = leftR;
+    int partition(int l, int r) {
+        int pivot = arr[r];
+        int i = l - 1;
+        
+        for (int j = l; j < r; ++j) {
+            if (arr[j] <= pivot) {
+                ++i;
+                std::swap(arr[i], arr[j]);
             }
         }
+        std::swap(arr[i + 1], arr[r]);
+        return i + 1;
+    }
+
+    void sequentialSort(int l, int r) {
+        if (l < r) {
+            int pi = partition(l, r);
+            sequentialSort(l, pi - 1);
+            sequentialSort(pi + 1, r);
+        }
+    }
+
+public:
+    QuickSortTask(std::vector<int>& array, int l, int r, int thresh = 1000)
+        : arr(array), left(l), right(r), threshold(thresh) {}
+
+    bool shouldFork() const override {
+        return (right - left) > threshold;
+    }
+
+    void compute() override {
+        if (left >= right) return;
+        
+        if (!shouldFork()) {
+            sequentialSort(left, right);
+            return;
+        }
+        
+        int pi = partition(left, right);
+        
+        auto& pool = ForkJoinPool::getCurrentPool();
+        
+        // Fork left subtask
+        pool.submit(std::make_unique<QuickSortTask>(arr, left, pi - 1, threshold));
+        
+        // Fork right subtask
+        pool.submit(std::make_unique<QuickSortTask>(arr, pi + 1, right, threshold));
     }
 };
 
+// Test and benchmark functions
+std::vector<int> generateRandomArray(int size) {
+    std::vector<int> arr(size);
+    std::mt19937 gen(42);
+    std::uniform_int_distribution<> dis(1, 1000000);
+    
+    for (int& val : arr) {
+        val = dis(gen);
+    }
+    return arr;
+}
 
-#endif
+bool isSorted(const std::vector<int>& arr) {
+    for (size_t i = 1; i < arr.size(); ++i) {
+        if (arr[i - 1] > arr[i]) return false;
+    }
+    return true;
+}
+
+int main() {
+    const int SIZE = 10000000;
+    
+    std::cout << "Generating random array of size " << SIZE << "...\n";
+    auto arr1 = generateRandomArray(SIZE);
+    auto arr2 = arr1; // Copy for comparison
+    
+    // Parallel sort with ForkJoinPool
+    std::cout << "\nParallel QuickSort with ForkJoinPool:\n";
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    ForkJoinPool pool(std::thread::hardware_concurrency());
+    pool.invoke(std::make_unique<QuickSortTask>(arr1, 0, arr1.size() - 1));
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    
+    std::cout << "Time: " << duration.count() << " ms\n";
+    std::cout << "Sorted correctly: " << (isSorted(arr1) ? "Yes" : "No") << "\n";
+    
+    // Sequential sort for comparison
+    std::cout << "\nSequential std::sort:\n";
+    start = std::chrono::high_resolution_clock::now();
+    
+    std::sort(arr2.begin(), arr2.end());
+    
+    end = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    
+    std::cout << "Time: " << duration.count() << " ms\n";
+    std::cout << "Sorted correctly: " << (isSorted(arr2) ? "Yes" : "No") << "\n";
+    
+    return 0;
+}  this is the input isnt the output wrong? why is orint stealing coming in sequwntial sort? its part of forkjoinpool
