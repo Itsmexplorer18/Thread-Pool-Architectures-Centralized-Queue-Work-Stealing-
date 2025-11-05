@@ -1,3 +1,6 @@
+#ifndef FORKJOINPOOL_H
+#define FORKJOINPOOL_H
+
 #include <iostream>
 #include <vector>
 #include <thread>
@@ -9,6 +12,8 @@
 #include <memory>
 #include <random>
 #include <chrono>
+
+static std::mutex cout_mutex;
 
 class RecursiveTask {
 public:
@@ -42,11 +47,12 @@ public:
     std::unique_ptr<RecursiveTask> steal(int thiefID) {
         std::lock_guard<std::mutex> lock(mtx);
         if (tasks.empty()) return nullptr;
-
-        std::cout << "[STEAL] Thread " << thiefID
-                  << " stealing from Thread " << ownerID
-                  << " (victim has " << tasks.size() << " tasks)\n";
-
+         // {
+        //     std::lock_guard<std::mutex> cout_lock(cout_mutex);
+        //     std::cout << "[STEAL] Thread " << thiefID
+        //               << " stealing from Thread " << ownerID
+        //               << " (victim has " << tasks.size() << " tasks)\n";
+        // }
         auto task = std::move(tasks.front());
         tasks.pop_front();
         return task;
@@ -80,24 +86,22 @@ private:
         while (!shutdown.load()) {
             std::unique_ptr<RecursiveTask> task = nullptr;
 
-            // Try to get a local task
             task = queues[id]->pop();
 
-            // Try to steal from others
             if (!task) {
                 for (int i = 0; i < numWorkers && !task; ++i) {
-                    if (i != id)
-                        task = queues[i]->steal(id);
+                    if (i == id) continue;
+                    task = queues[i]->steal(id);
                 }
             }
 
             if (task) {
-                activeWorkers.fetch_add(1);
+                activeWorkers.fetch_add(1, std::memory_order_relaxed);
                 task->compute();
-                activeWorkers.fetch_sub(1);
+                activeWorkers.fetch_sub(1, std::memory_order_relaxed);
                 globalCV.notify_all();
             } else {
-                // No work, wait briefly
+                // No work: wait briefly
                 std::unique_lock<std::mutex> lock(globalMtx);
                 globalCV.wait_for(lock, std::chrono::microseconds(100));
             }
@@ -106,10 +110,9 @@ private:
 
 public:
     explicit ForkJoinPool(int threads = std::thread::hardware_concurrency())
-        : numWorkers(threads) {
+        : numWorkers(threads ? threads : 1) {
         for (int i = 0; i < numWorkers; ++i)
             queues.push_back(std::make_unique<WorkStealingDeque>(i));
-
         for (int i = 0; i < numWorkers; ++i)
             workers.emplace_back(&ForkJoinPool::workerThread, this, i);
     }
@@ -117,16 +120,14 @@ public:
     ~ForkJoinPool() {
         shutdown.store(true);
         globalCV.notify_all();
-        for (auto &worker : workers)
-            if (worker.joinable())
-                worker.join();
+        for (auto &w : workers) if (w.joinable()) w.join();
     }
 
     void submit(std::unique_ptr<RecursiveTask> task) {
         int id = workerID;
-        if (id >= 0 && id < numWorkers)
+        if (id >= 0 && id < numWorkers) {
             queues[id]->push(std::move(task));
-        else {
+        } else {
             static thread_local std::mt19937 gen(std::random_device{}());
             std::uniform_int_distribution<> dis(0, numWorkers - 1);
             queues[dis(gen)]->push(std::move(task));
@@ -150,7 +151,7 @@ public:
                     break;
                 }
             }
-            return allEmpty && activeWorkers.load() == 0;
+            return allEmpty && activeWorkers.load(std::memory_order_relaxed) == 0;
         });
     }
 };
@@ -161,37 +162,37 @@ class QuickSortTask : public RecursiveTask {
 private:
     std::vector<int> &arr;
     ForkJoinPool &pool;
-    int left, right;
+    int leftInit, rightInit;
     const int threshold;
 
-    int partition(int l, int r) {
-        int pivot = arr[r];
+    static int partition(std::vector<int> &a, int l, int r) {
+        int pivot = a[r];
         int i = l - 1;
         for (int j = l; j < r; ++j) {
-            if (arr[j] <= pivot) {
+            if (a[j] <= pivot) {
                 ++i;
-                std::swap(arr[i], arr[j]);
+                std::swap(a[i], a[j]);
             }
         }
-        std::swap(arr[i + 1], arr[r]);
+        std::swap(a[i + 1], a[r]);
         return i + 1;
     }
 
-    void sequentialSort(int l, int r) {
+    static void sequentialSort(std::vector<int> &a, int l, int r) {
         if (l < r) {
-            int pi = partition(l, r);
-            sequentialSort(l, pi - 1);
-            sequentialSort(pi + 1, r);
+            int pi = partition(a, l, r);
+            sequentialSort(a, l, pi - 1);
+            sequentialSort(a, pi + 1, r);
         }
     }
 
 public:
-    QuickSortTask(std::vector<int> &array, ForkJoinPool &poolRef, int l, int r, int thresh = 1000)
-        : arr(array), pool(poolRef), left(l), right(r), threshold(thresh) {}
+    QuickSortTask(std::vector<int> &array, ForkJoinPool &poolRef, int l, int r, int thresh = 200000)
+        : arr(array), pool(poolRef), leftInit(l), rightInit(r), threshold(thresh) {}
 
-    bool shouldFork() const override { return (right - left) > threshold; }
+    bool shouldFork() const override { return (rightInit - leftInit) > threshold; }
 
-void compute() override {
+    void compute() override {
         int l = leftInit;
         int r = rightInit;
 
@@ -225,54 +226,7 @@ void compute() override {
                 r = leftR;
             }
         }
-}
+    }
 };
 
-std::vector<int> generateRandomArray(int size) {
-    std::vector<int> arr(size);
-    std::mt19937 gen(42);
-    std::uniform_int_distribution<> dis(1, 1000000);
-    for (int &val : arr)
-        val = dis(gen);
-    return arr;
-}
-
-bool isSorted(const std::vector<int> &arr) {
-    for (size_t i = 1; i < arr.size(); ++i)
-        if (arr[i - 1] > arr[i])
-            return false;
-    return true;
-}
-
-// ================= Main =================
-int main() {
-    const int SIZE = 10000000;
-    std::cout << "Generating random array of size " << SIZE << "...\n";
-    auto arr1 = generateRandomArray(SIZE);
-    auto arr2 = arr1;
-
-    // Parallel QuickSort
-    std::cout << "\nParallel QuickSort with ForkJoinPool:\n";
-    auto start = std::chrono::high_resolution_clock::now();
-
-    ForkJoinPool pool(std::thread::hardware_concurrency());
-    pool.invoke(std::make_unique<QuickSortTask>(arr1, pool, 0, arr1.size() - 1));
-
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    std::cout << "Time: " << duration.count() << " ms\n";
-    std::cout << "Sorted correctly: " << (isSorted(arr1) ? "Yes" : "No") << "\n";
-
-    // Sequential std::sort
-    std::cout << "\nSequential std::sort:\n";
-    start = std::chrono::high_resolution_clock::now();
-
-    std::sort(arr2.begin(), arr2.end());
-
-    end = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    std::cout << "Time: " << duration.count() << " ms\n";
-    std::cout << "Sorted correctly: " << (isSorted(arr2) ? "Yes" : "No") << "\n";
-
-    return 0;
-}
+#endif
