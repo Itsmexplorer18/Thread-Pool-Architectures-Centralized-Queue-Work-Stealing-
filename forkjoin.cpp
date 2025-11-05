@@ -136,6 +136,7 @@ public:
 
     void invoke(std::unique_ptr<RecursiveTask> task) {
         submit(std::move(task));
+        globalCV.notify_all();
         waitForCompletion();
     }
 
@@ -190,21 +191,41 @@ public:
 
     bool shouldFork() const override { return (right - left) > threshold; }
 
-    void compute() override {
-        if (left >= right)
-            return;
+void compute() override {
+        int l = leftInit;
+        int r = rightInit;
 
-        if (!shouldFork()) {
-            sequentialSort(left, right);
-            return;
+        while (l < r) {
+            if ((r - l) <= threshold) {
+                sequentialSort(arr, l, r);
+                return;
+            }
+
+            int pi = partition(arr, l, r);
+
+            int leftL = l;
+            int leftR = pi - 1;
+            int rightL = pi + 1;
+            int rightR = r;
+
+            int leftSize = (leftR >= leftL) ? (leftR - leftL + 1) : 0;
+            int rightSize = (rightR >= rightL) ? (rightR - rightL + 1) : 0;
+
+            if (leftSize < rightSize) {
+                if (leftSize > 0) {
+                    pool.submit(std::make_unique<QuickSortTask>(arr, pool, leftL, leftR, threshold));
+                }
+                l = rightL;
+                r = rightR;
+            } else {
+                if (rightSize > 0) {
+                    pool.submit(std::make_unique<QuickSortTask>(arr, pool, rightL, rightR, threshold));
+                }
+                l = leftL;
+                r = leftR;
+            }
         }
-
-        int pi = partition(left, right);
-
-        // Fork both subtasks
-        pool.submit(std::make_unique<QuickSortTask>(arr, pool, left, pi - 1, threshold));
-        pool.submit(std::make_unique<QuickSortTask>(arr, pool, pi + 1, right, threshold));
-    }
+}
 };
 
 std::vector<int> generateRandomArray(int size) {
