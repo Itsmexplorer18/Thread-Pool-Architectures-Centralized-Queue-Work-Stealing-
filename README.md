@@ -49,6 +49,11 @@ g++ -std=c++17 -O2 -pthread -Iinclude src/main.cpp src/benchmark.cpp -o benchmar
 **Use ForkJoin when:**
 - Recursive algorithms
 - Divide-and-conquer problems
+- ## to-do-optimizations and theoritical understanding
+- false sharing
+- child stealing vs continuation stealing
+- lock free implementation 
+
 
 ## Requirements
 
