@@ -21,24 +21,6 @@
 | Best For | I/O, variable tasks | CPU-intensive recursion |
 | Examples | Image processing | Merge sort, tree traversal |
 
-## Building
-```bash
-# Build everything
-mkdir build && cd build
-cmake ..
-make
-
-# Build specific component
-make threadpool_benchmark
-make forkjoin_benchmark
-
-# Or with g++ directly
-cd threadpool
-g++ -std=c++17 -O2 -pthread -Iinclude src/main.cpp src/benchmark.cpp -o benchmark
-
-cd ../forkjoin
-g++ -std=c++17 -O2 -pthread -Iinclude src/main.cpp src/benchmark.cpp -o benchmark
-```
 
 ## When to Use What?
 **Use ThreadPool when:**
